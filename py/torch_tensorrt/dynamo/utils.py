@@ -26,6 +26,7 @@ import tensorrt as trt
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.fx.experimental.proxy_tensor import unset_fake_temporarily
+from torch.utils._sympy.numbers import int_oo
 from torch_tensorrt._Device import Device
 from torch_tensorrt._enums import dtype
 from torch_tensorrt._features import ENABLED_FEATURES
@@ -127,14 +128,12 @@ def unified_dtype_converter(
         raise TypeError("%s is not a supported dtype" % dtype)
 
 
-def deallocate_module(module: torch.fx.GraphModule, delete_module: bool = True) -> None:
+def deallocate_module(module: torch.fx.GraphModule) -> None:
     """
     This is a helper function to delete the instance of module. We first move it to CPU and then
     delete the object. This function ensures the GPU memory occupied by the module is released effectively after this call
     """
     module.to(CPU_DEVICE)
-    if delete_module:
-        del module
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -406,7 +405,7 @@ def contains_sym_int(tensor: torch.Tensor) -> bool:
     return any(isinstance(dim, torch.SymInt) for dim in tensor)
 
 
-def extract_var_range_info(symbolic_integer: torch.SymInt) -> Dict[str, int]:
+def extract_var_range_info(symbolic_integer: torch.SymInt) -> Dict[str, Optional[int]]:
     """
     This function returns the min, max, opt values of a symbolic integer.
     """
@@ -418,16 +417,31 @@ def extract_var_range_info(symbolic_integer: torch.SymInt) -> Dict[str, int]:
     # https://pytorch.org/docs/stable/generated/torch.fx.experimental.symbolic_shapes.ShapeEnv.html#torch.fx.experimental.symbolic_shapes.ShapeEnv.bound_sympy
     # expr.xreplace replaces the symbolic variables with their current values and computes the expression.
     var_range = shape_env.var_to_range.get(expr, None) or shape_env.bound_sympy(expr)
+    # PyTorch commit adb73cc: var_to_val->backed_var_to_val, unbacked_var_to_val->real_tensor_prop_unbacked_vals
+    var_to_val_map = getattr(shape_env, "backed_var_to_val", None) or getattr(
+        shape_env, "var_to_val", None
+    )
+    if var_to_val_map is None:
+        var_to_val_map = {}
+    unbacked_map = getattr(
+        shape_env, "real_tensor_prop_unbacked_vals", None
+    ) or getattr(shape_env, "unbacked_var_to_val", None)
+    if unbacked_map is None:
+        unbacked_map = {}
     var_val = (
-        shape_env.var_to_val.get(expr, None)
-        or shape_env.unbacked_var_to_val.get(expr, None)
-        or expr.xreplace(shape_env.var_to_val)
+        var_to_val_map.get(expr, None)
+        or unbacked_map.get(expr, None)
+        or expr.xreplace(var_to_val_map)
     )
     assert var_range, var_val
-    min_val, max_val = int(var_range.lower), int(var_range.upper)
+    min_val, max_val = (
+        int(var_range.lower),
+        int(var_range.upper) if var_range.upper != int_oo else None,
+    )
+
     # Torchdynamo 0/1 specialization outlier
     min_val = 1 if min_val == 2 else min_val
-    min_max_opt = {}
+    min_max_opt: Dict[str, Optional[int]] = {}
     min_max_opt["min"] = min_val
     min_max_opt["max"] = max_val
     if isinstance(var_val, (sympy.core.numbers.Integer, int)):
@@ -438,14 +452,14 @@ def extract_var_range_info(symbolic_integer: torch.SymInt) -> Dict[str, int]:
 
 def unwrap_tensor_shape(
     tensor: Union[torch.Tensor, FakeTensor, torch.SymInt], mode: Optional[str] = ""
-) -> Sequence[Union[int, Tuple[int, int]]]:
+) -> Sequence[Union[Optional[int], Tuple[Optional[int], Optional[int]]]]:
     """
     This is a helper function used to print/return the shape of the tensor.
     For regular torch.tensor's, it returns the static shape.
     For symbolic tensors, eg:(1, s0, 4), this function returns [1, [min, max], 4]. The min
     and max correspond to the lower and upper values of s0 symbolic dimension.
     """
-    tensor_shape: List[Union[int, Tuple[int, int]]] = []
+    tensor_shape: List[Union[Optional[int], Tuple[Optional[int], Optional[int]]]] = []
     # for dimension in tensor.shape:
     if isinstance(tensor, int):
         tensor_shape.append(tensor)
@@ -699,8 +713,9 @@ def check_module_output(
     arg_inputs: Any,
     kwarg_inputs: Any = None,
 ) -> bool:
-    old_outputs, new_outputs = refitted_module(*arg_inputs), new_module(
-        *arg_inputs, **kwarg_inputs
+    old_outputs, new_outputs = (
+        refitted_module(*arg_inputs),
+        new_module(*arg_inputs, **kwarg_inputs),
     )
     if type(old_outputs) != type(new_outputs):
         logger.warning("The output types are different. Output check is skipped.")
@@ -840,7 +855,10 @@ def get_output_dtypes(output: Any, truncate_double: bool = False) -> List[dtype]
     if isinstance(output, torch.fx.node.Node):
         if "val" in output.meta:
             output_meta = output.meta["val"]
-            if isinstance(output_meta, (FakeTensor, torch.Tensor)):
+            if output_meta is None:
+                # Placeholder output (e.g. unused slot in flash attention return tuple)
+                pass
+            elif isinstance(output_meta, (FakeTensor, torch.Tensor)):
                 if truncate_double and output_meta.dtype == torch.float64:
                     output_dtypes.append(dtype.float32)
                 else:

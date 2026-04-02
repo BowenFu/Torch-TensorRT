@@ -7,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import torch
 import torch._dynamo as td
+import torch_tensorrt.logging as torchtrt_logging
 from torch._dynamo.backends.common import aot_autograd
 from torch._dynamo.utils import detect_fake_mode
 from torch._functorch.aot_autograd import aot_export_joint_simple
@@ -23,7 +24,6 @@ from torch_tensorrt.dynamo.lowering import (
 from torch_tensorrt.dynamo.utils import (
     parse_dynamo_kwargs,
     prepare_inputs,
-    set_log_level,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ def torch_tensorrt_backend(
         and "debug" in kwargs["options"]
         and kwargs["options"]["debug"]
     ) or ("debug" in kwargs and kwargs["debug"]):
-        set_log_level(logger.parent, logging.DEBUG)
+        torchtrt_logging.set_level(logging.DEBUG)
 
     DEFAULT_BACKEND = aot_torch_tensorrt_aten_backend
 
@@ -62,7 +62,7 @@ def aot_torch_tensorrt_aten_backend(
         )
         settings_aot_autograd = {}
         settings_aot_autograd["decompositions"] = get_decompositions(
-            settings.enable_experimental_decompositions
+            settings.enable_experimental_decompositions, settings.decompose_attention
         )
         # This is added since detach lowering leads to alias nodes
         # Error - View operation returned a tensor that is the same as the input base tensor
@@ -118,9 +118,10 @@ def _pretraced_backend(
         fake_mode = detect_fake_mode(sample_inputs)
 
         # Place backend tracing within FakeTensor context allowing nonfake Tensors
-        with unittest.mock.patch.object(
-            fake_mode, "allow_non_fake_inputs", True
-        ), fake_mode:
+        with (
+            unittest.mock.patch.object(fake_mode, "allow_non_fake_inputs", True),
+            fake_mode,
+        ):
             repair_input_aliasing(gm, settings)
 
             # Remove sym_int placeholders and inputs
@@ -140,7 +141,8 @@ def _pretraced_backend(
                     sample_inputs,
                     trace_joint=False,
                     decompositions=get_decompositions(
-                        settings.enable_experimental_decompositions
+                        settings.enable_experimental_decompositions,
+                        settings.decompose_attention,
                     ),
                 )
 
@@ -170,7 +172,7 @@ def _pretraced_backend(
                 engine_cache=engine_cache,
             )
             return trt_compiled
-    except (AssertionError, RuntimeError):
+    except (AssertionError, RuntimeError, TypeError):
         if not settings.pass_through_build_failures:
             logger.warning(
                 "TRT conversion failed on the subgraph. See trace above. "

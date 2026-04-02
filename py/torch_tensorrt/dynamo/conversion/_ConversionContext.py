@@ -24,6 +24,7 @@ class ConversionContext:
     requires_output_allocator: bool = False
     weight_refit_map: dict[str, torch.Tensor] = field(default_factory=dict)
     cpu_weights_reference_holder: list[torch.Tensor] = field(default_factory=list)
+    current_node: object = None
 
     def record_weight(self, name: str, weight: torch.Tensor) -> None:
         """
