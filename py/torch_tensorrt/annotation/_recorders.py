@@ -22,7 +22,7 @@ parameters.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 
@@ -188,8 +188,20 @@ class _CuTeDSLLaunchProxy:
                 they are not recorded because they are not needed for TRT
                 QDP descriptor construction.
         """
-        self._recorder.grid = tuple(grid) if not isinstance(grid, tuple) else grid
-        self._recorder.block = tuple(block) if not isinstance(block, tuple) else block
+        grid_t = tuple(grid) if not isinstance(grid, tuple) else grid
+        block_t = tuple(block) if not isinstance(block, tuple) else block
+        if len(grid_t) != 3:
+            raise ValueError(
+                f"_CuTeDSLLaunchProxy.launch: grid must have exactly 3 elements (x, y, z), "
+                f"got {len(grid_t)}: {grid_t!r}"
+            )
+        if len(block_t) != 3:
+            raise ValueError(
+                f"_CuTeDSLLaunchProxy.launch: block must have exactly 3 elements (x, y, z), "
+                f"got {len(block_t)}: {block_t!r}"
+            )
+        self._recorder.grid = grid_t
+        self._recorder.block = block_t
 
 
 @dataclass

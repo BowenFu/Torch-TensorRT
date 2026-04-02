@@ -188,6 +188,24 @@ def tactics_string(specs: Sequence[Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+_INVALID_ATTR_KEY_CHARS: frozenset = frozenset("=,:|")
+
+
+def _validate_attr_key(key: str) -> None:
+    """Raise ``ValueError`` if *key* contains characters that would corrupt the metadata format.
+
+    The metadata format uses ``=`` for key-value separation, ``,`` between pairs,
+    ``:`` between backend and plugin name, and ``|`` between fn_spec entries.
+    A key containing any of these breaks the parser.
+    """
+    invalid = _INVALID_ATTR_KEY_CHARS & set(key)
+    if invalid:
+        raise ValueError(
+            f"attr key {key!r} contains invalid characters {sorted(invalid)!r}. "
+            "Keys must not contain '=', ',', ':', or '|'."
+        )
+
+
 def _format_attrs(attrs: Optional[Dict[str, Any]]) -> str:
     """Serialise an attrs dict to a ``k=v,k=v,...`` string sorted by key.
 
@@ -204,7 +222,11 @@ def _format_attrs(attrs: Optional[Dict[str, Any]]) -> str:
     """
     if not attrs:
         return ""
-    return ",".join(f"{k}={v}" for k, v in sorted(attrs.items()))
+    parts = []
+    for k, v in sorted(attrs.items()):
+        _validate_attr_key(k)
+        parts.append(f"{k}={v}")
+    return ",".join(parts)
 
 
 def _format_fn_specs(fn_specs: List[Tuple[str, Dict[str, Any]]]) -> str:
@@ -366,10 +388,25 @@ def _parse_single_tta_segment(raw: str) -> Optional[Dict[str, Any]]:
     tok_idx += 1
     if tok_idx >= len(tokens):
         return None
-    torch_op_token: str = tokens[tok_idx]
-    if not torch_op_token.startswith("torch_op:"):
+
+    # Use raw.find("torch_op:") to extract the path correctly even if it
+    # contains spaces (e.g. module qualified names with brackets).
+    torch_op_idx = raw.find("torch_op:")
+    if torch_op_idx < 0:
         return None
-    torch_op: str = torch_op_token[len("torch_op:"):]
+    torch_op: str = raw[torch_op_idx + len("torch_op:"):]
+
+    # Log a debug warning if there are unexpected tokens between attrs and torch_op.
+    expected_torch_op_token = tokens[tok_idx]
+    if not expected_torch_op_token.startswith("torch_op:") and tok_idx < len(tokens):
+        logger.debug(
+            "_parse_single_tta_segment: unexpected token %r between attrs and torch_op in %r",
+            expected_torch_op_token,
+            raw,
+        )
+
+    if not torch_op:
+        return None
 
     result: Dict[str, Any] = {
         "backend": backend,

@@ -269,6 +269,18 @@ class TestCustomPluginSpec(unittest.TestCase):
         self.assertEqual(tta.custom_plugin(spec, meta_impl=meta).op_name,
                          tta.custom_plugin(spec, meta_impl=meta).op_name)
 
+    def test_op_name_differs_across_kernel_functions(self):
+        def kernel_a(x, out):
+            pass
+
+        def kernel_b(x, out):
+            pass
+
+        meta = lambda x: x.new_empty(x.shape)
+        op_name_a = tta.custom_plugin(tta.triton(kernel_a), meta_impl=meta).op_name
+        op_name_b = tta.custom_plugin(tta.triton(kernel_b), meta_impl=meta).op_name
+        self.assertNotEqual(op_name_a, op_name_b)
+
     def test_is_immutable(self):
         def kernel(x, out):
             pass

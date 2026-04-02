@@ -9,16 +9,23 @@ Usage::
     import torch_tensorrt.annotation as tta
 
     # Triton kernel descriptor
-    spec = tta.custom_plugin(tta.triton(my_triton_kernel, configs=[{"BLOCK_SIZE": 128}]))
+    spec = tta.custom_plugin(
+        tta.triton(my_triton_kernel, configs=[{"BLOCK_SIZE": 128}]),
+        meta_impl=lambda x: x.new_empty(x.shape),
+    )
 
     # CuTile kernel descriptor
-    spec = tta.custom_plugin(tta.cutile(my_cutile_kernel, arch=120))
+    spec = tta.custom_plugin(
+        tta.cutile(my_cutile_kernel, arch=120),
+        meta_impl=lambda x: x.new_empty(x.shape),
+    )
 
     # CuTeDSL kernel descriptor
-    spec = tta.custom_plugin(tta.cutedsl(my_cutedsl_kernel))
+    spec = tta.custom_plugin(
+        tta.cutedsl(my_cutedsl_kernel),
+        meta_impl=lambda x: x.new_empty(x.shape),
+    )
 """
-
-import logging
 
 from ._errors import TTADiagnosticError
 
@@ -36,13 +43,12 @@ from ._specs import (
 
 from ._custom_plugin._descriptor import CustomPluginSpec, custom_plugin
 
-_logger = logging.getLogger(__name__)
-
 __all__ = [
     # Error types
     "TTADiagnosticError",
     # Descriptor types
     "AnnotationMetadata",
+    "KernelImplSpec",
     "TritonSpec",
     "CuTileSpec",
     "CuTeDSLSpec",
@@ -52,4 +58,6 @@ __all__ = [
     "triton",
     "cutile",
     "cutedsl",
+    # Utilities
+    "normalize_impl_to_spec",
 ]

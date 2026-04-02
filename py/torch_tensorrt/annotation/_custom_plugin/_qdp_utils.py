@@ -225,7 +225,7 @@ def derive_impl_id(
 
 def make_qdp_symbol(impl_id: str) -> str:
     """Derive a unique QDP namespace::name from an impl_id."""
-    return f"tta_custom::host_kernel_{impl_id[:8]}"
+    return f"tta_custom::host_kernel_{impl_id[:16]}"
 
 
 # ---- Backend-object detection heuristics ----
@@ -938,6 +938,7 @@ def _launch_params_from_trt(
     extra_args: Any,
     num_inputs: int = 1,
     num_outputs: int = 1,
+    param_binding_indices: Optional[List[int]] = None,
 ) -> types.SimpleNamespace:
     """Build a SimpleNamespace from a trtp.KernelLaunchParams and SymIntExprs.
 
@@ -969,12 +970,15 @@ def _launch_params_from_trt(
         getattr(launch, "block_y", 1),
         getattr(launch, "block_z", 1),
     )
+    if param_binding_indices is None:
+        param_binding_indices = list(range(num_inputs)) + list(
+            range(num_inputs, num_inputs + num_outputs)
+        )
     return types.SimpleNamespace(
         grid=grid,
         block=block,
         shared_mem=getattr(launch, "shared_mem", 0),
-        param_binding_indices=list(range(num_inputs))
-        + list(range(num_inputs, num_inputs + num_outputs)),
+        param_binding_indices=param_binding_indices,
         sym_int_exprs=extra_args,
     )
 
@@ -1046,7 +1050,7 @@ def analyze_launch_args(
     scalar_symints: List[Any] = []
     seen_scalar = False
 
-    for a in args:
+    for k, a in enumerate(args):
         if isinstance(a, SymbolicTensor):
             if seen_scalar:
                 raise QDPRuntimeError(
@@ -1054,9 +1058,10 @@ def analyze_launch_args(
                     stage="aot_impl",
                     backend=backend,
                     msg=(
-                        "backend kernel arguments must be ordered as "
+                        f"argument {k} (role=tensor, {a.role.name} index {a.index}) "
+                        f"follows a scalar argument — backend kernel arguments must be ordered as "
                         "[all tensor pointers..., then all scalars...]; "
-                        "found a tensor argument after scalar arguments"
+                        f"total args={len(args)}, num_inputs={num_inputs}, num_outputs={num_outputs}"
                     ),
                 )
             param_binding_indices.append(compute_binding_index(a))
@@ -1075,8 +1080,9 @@ def analyze_launch_args(
                 stage="aot_impl",
                 backend=backend,
                 msg=(
-                    f"unsupported launch argument type {type(a)!r}; "
-                    "only SymbolicTensor, SymInt32, and int scalars are allowed"
+                    f"argument {k} has unsupported type {type(a)!r}; "
+                    "only SymbolicTensor, SymInt32, and int scalars are allowed. "
+                    f"total args={len(args)}, num_inputs={num_inputs}, num_outputs={num_outputs}"
                 ),
             )
 

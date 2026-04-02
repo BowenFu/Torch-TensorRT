@@ -23,7 +23,6 @@ class CustomPluginTacticManager:
     def __init__(self):
         """Initialize tactic manager with empty cache."""
         self.cache: Dict[Tuple[Any, ...], AOTMetadata] = {}
-        self.tactics: Dict[str, List[AOTMetadata]] = {}
 
     def get_or_compile_tactic(
         self,
@@ -210,6 +209,22 @@ def extract_aot_metadata_dict(metadata: AOTMetadata) -> Dict[str, Any]:
             f"AOT metadata of type '{type(metadata).__name__}' must expose .binary and .kernel_name attributes",
             stage="compile",
             backend="unknown",
+        )
+    if not hasattr(metadata, "launch_params") or metadata.launch_params is None:
+        raise TTAPluginError(
+            f"AOTMetadata for kernel '{metadata.kernel_name}' is missing 'launch_params'. "
+            "The backend may not have completed AOT compilation successfully.",
+            stage="compile",
+            backend=getattr(metadata, "backend", "unknown"),
+        )
+    required_fields = ("grid", "block", "shared_mem", "param_binding_indices", "sym_int_exprs")
+    missing = [f for f in required_fields if not hasattr(metadata.launch_params, f)]
+    if missing:
+        raise TTAPluginError(
+            f"launch_params for kernel '{metadata.kernel_name}' is missing fields: {missing}. "
+            "The AOT backend must populate all launch_params fields.",
+            stage="compile",
+            backend=getattr(metadata, "backend", "unknown"),
         )
     launch_params = metadata.launch_params
     binary_data = (

@@ -621,7 +621,9 @@ trt_plugins.custom_op(
 # test reference can be computed independently without calling the torch op.
 # ---------------------------------------------------------------------------
 
-_W_COLUMN_SCALE = torch.full((512,), 3.0)  # CPU tensor; lowered via trt.add_constant
+_LLM_B, _LLM_H = 8, 512  # LLM-domain shape used for cross-backend and weight-injection tests
+
+_W_COLUMN_SCALE = torch.full((_LLM_H,), 3.0)  # CPU tensor; lowered via trt.add_constant
 
 
 @triton.jit
@@ -828,6 +830,9 @@ class _BackendE2ETests:
         inputs = [torch.randn(16, 256, device="cuda"), torch.randn(16, 256, device="cuda")]
         _check(self, m, inputs, self._BINARY_REF, f"{self._NS}::{self._BINARY_OP}")
 
+    # TRT mergeMatmulLayers delivers non-contiguous sub-region buffers to
+    # IPluginV3::enqueue without inserting a reformat copy, violating the
+    # LINEAR stride contract.  Expected to fail until TRT fixes this.
     @unittest.expectedFailure
     def test_gated_ffn_block(self):
         """Full gated FFN block with shared input — expected to fail due to TRT bug.
@@ -1121,7 +1126,6 @@ _cutile_reglu  = lambda: torch.ops.torchtrt_e2e_cutile.reglu.default
 _cutedsl_silu  = lambda: torch.ops.torchtrt_e2e_cutedsl.silu.default
 _cutedsl_had   = lambda: torch.ops.torchtrt_e2e_cutedsl.hadamard.default
 
-_LLM_B, _LLM_H = 8, 512  # LLM-domain shape for all cross-backend tests
 
 
 class TestCrossBackendE2E(unittest.TestCase):
@@ -1318,7 +1322,7 @@ class TestDtypeE2E(unittest.TestCase):
         inputs = [torch.randn(8, 512, dtype=torch.float16, device="cuda")]
         ref_fn = lambda x: (x.float() * torch.sigmoid(x.float())).half()
         _check(self, m, inputs, ref_fn, "torchtrt_e2e_triton::silu_f16",
-               rtol=1e-2, atol=1e-2)
+               rtol=1e-3, atol=1e-3)
 
     def test_cutile_relu_float16(self):
         """CuTile ReLU with float16 input/output."""
@@ -1326,7 +1330,7 @@ class TestDtypeE2E(unittest.TestCase):
         inputs = [torch.randn(8, 512, dtype=torch.float16, device="cuda")]
         ref_fn = lambda x: torch.relu(x)
         _check(self, m, inputs, ref_fn, "torchtrt_e2e_cutile::relu",
-               rtol=1e-2, atol=1e-2)
+               rtol=1e-3, atol=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -1421,7 +1425,7 @@ class TestBF16DtypeE2E(unittest.TestCase):
         # Engine-level dtype check: output must be bf16, not fp32.
         self.assertEqual(trt_out.dtype, torch.bfloat16,
                          "Expected engine output dtype to be bfloat16")
-        torch.testing.assert_close(trt_out, ref_fn(*inputs), rtol=1e-1, atol=1e-1)
+        torch.testing.assert_close(trt_out, ref_fn(*inputs), rtol=2e-2, atol=2e-2)
 
     def test_cutile_relu_bfloat16(self):
         """BF16 CuTile ReLU: engine runs in bf16; output dtype is bfloat16."""
@@ -1436,7 +1440,7 @@ class TestBF16DtypeE2E(unittest.TestCase):
         trt_out = compiled(*inputs)
         self.assertEqual(trt_out.dtype, torch.bfloat16,
                          "Expected engine output dtype to be bfloat16")
-        torch.testing.assert_close(trt_out, ref_fn(*inputs), rtol=1e-1, atol=1e-1)
+        torch.testing.assert_close(trt_out, ref_fn(*inputs), rtol=2e-2, atol=2e-2)
 
 
 # ---------------------------------------------------------------------------

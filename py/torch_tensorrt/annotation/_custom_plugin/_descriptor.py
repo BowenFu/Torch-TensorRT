@@ -584,6 +584,30 @@ def _build_identity_desc_fn(num_outputs: int) -> Callable[..., Any]:
     return _desc
 
 
+def _is_symbolic_shape_expr(shape_expr: Any) -> bool:
+    """Return True if any element of shape_expr is a dynamic/symbolic dimension.
+
+    Checks for TRT IDimensionExpr objects (which carry ``is_constant`` or
+    ``get_constant_value`` attributes) and falls back to checking whether the
+    value is not a plain int/float.  This replaces the fragile
+    ``"Fake" in str(type(d))`` heuristic used before TRT 10.x.
+
+    Args:
+        shape_expr: Iterable of dimension values from a ``TensorDesc.shape_expr``.
+
+    Returns:
+        ``True`` if any element is a TRT symbolic dimension expression; ``False``
+        if all elements are concrete Python int/float values.
+    """
+    for d in shape_expr:
+        # Check for TRT IDimensionExpr which are symbolic
+        if hasattr(d, 'is_constant') or hasattr(d, 'get_constant_value'):
+            return True  # It's a TRT dimension expression
+        if not isinstance(d, (int, float)):
+            return True
+    return False
+
+
 def _build_meta_impl_desc_fn(
     meta_impl: Callable[..., Any],
     num_outputs: int,
@@ -622,9 +646,7 @@ def _build_meta_impl_desc_fn(
         inp_args = args[:_num_inputs]
         shape_td0 = inp_args[0].shape_expr
         try:
-            first_call = not shape_td0 or any(
-                "Fake" in str(type(d)) for d in shape_td0
-            )
+            first_call = not shape_td0 or _is_symbolic_shape_expr(shape_td0)
         except (TypeError, ValueError):
             # shape_expr may not be iterable in some TRT versions; treat as
             # symbolic (first_call=True) so we use the symbolic path safely.
@@ -964,8 +986,20 @@ def _build_aot_fn(
                 f"(inputs + outputs). TRT may not have passed the outputs "
                 f"argument."
             )
-        out_descs = list(args[num_inputs])        # outputs is a sequence
-        tactic_id = int(args[num_inputs + 1]) if len(args) > num_inputs + 1 else 1
+        out_descs_raw = args[num_inputs]
+        if hasattr(out_descs_raw, "__iter__"):
+            out_descs = list(out_descs_raw)
+        else:
+            out_descs = [out_descs_raw]
+        if len(args) > num_inputs + 1:
+            tactic_id = int(args[num_inputs + 1])
+        else:
+            tactic_id = 1
+            logger.debug(
+                "aot_impl for %r: tactic_id not provided by TRT, defaulting to 1. "
+                "This may indicate a TRT version mismatch.",
+                op_name,
+            )
         tactic_idx = tactic_id - 1
 
         if tactic_idx < 0 or tactic_idx >= len(tactic_table):
@@ -1073,7 +1107,10 @@ def register_custom_plugin(
 
     Args:
         descriptor:  The :class:`CustomPluginSpec` to register.
-        num_inputs:  Number of TRT input tensors for this op.
+        num_inputs:  Number of TRT input tensors for this op. MUST include weight
+            tensors (from trt.add_constant) in addition to activation inputs. The
+            function computes num_dynamic = num_inputs - len(descriptor.weights)
+            internally to pass only activation count to meta_impl.
         num_outputs: Number of TRT output tensors (default 1).
         qdp_name:    Optional override for the QDP registration name.  When
                      provided the plugin is registered under this name instead
@@ -1250,6 +1287,23 @@ def lower_custom_plugin_descriptor(
         # float(np.array([v])) fails in NumPy 1.25+).
         plugin_layer = ctx.net.add_plugin(plugin_fn(*trt_inputs), aot=True)
         plugin_layer.name = name
+
+        # Sanity check: TRT plugin layer output count must match the descriptor's
+        # pre-computed num_outputs.  A mismatch here means meta_impl inferred the
+        # wrong count (e.g., because a dispatch mode was active at creation time).
+        if plugin_layer.num_outputs != descriptor.num_outputs:
+            raise QDPRuntimeError(
+                op=op_name,
+                stage="lowering",
+                backend="custom_plugin",
+                msg=(
+                    f"TRT plugin layer has {plugin_layer.num_outputs} outputs but descriptor "
+                    f"expected {descriptor.num_outputs}. This likely means meta_impl inferred "
+                    f"num_outputs incorrectly (e.g., while a dispatch mode was active). "
+                    f"Pass num_outputs= explicitly to custom_plugin()."
+                ),
+            )
+
         _first_spec = descriptor.specs[0] if descriptor.specs else None
         if isinstance(_first_spec, TritonSpec):
             _backend = "triton"

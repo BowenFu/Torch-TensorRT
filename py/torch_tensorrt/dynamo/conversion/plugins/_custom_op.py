@@ -1,4 +1,6 @@
-from typing import Any, Callable, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from torch.fx.node import Node
 from torch_tensorrt.dynamo._settings import CompilationSettings
@@ -8,10 +10,13 @@ from torch_tensorrt.dynamo.conversion.plugins._generate_plugin_converter import 
     generate_plugin_converter,
 )
 
+if TYPE_CHECKING:
+    from torch_tensorrt.annotation._custom_plugin._descriptor import CustomPluginSpec
+
 
 def custom_op(
     op_name: str,
-    impl: Any = None,
+    impl: Optional["CustomPluginSpec"] = None,
     capability_validator: Optional[Callable[[Node, CompilationSettings], bool]] = None,
     priority: ConverterPriority = ConverterPriority.STANDARD,
     supports_dynamic_shapes: bool = False,

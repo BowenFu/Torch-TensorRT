@@ -23,7 +23,7 @@ Spec hierarchy
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -97,8 +97,8 @@ class TritonSpec:
 
     launch_fn: Callable
     configs: Optional[List[Dict[str, Any]]] = None
-    input_formats: Optional[Any] = None
-    output_formats: Optional[Any] = None
+    input_formats: Optional[Sequence[int]] = None
+    output_formats: Optional[Sequence[int]] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def to_cache_key(self) -> tuple:
@@ -134,8 +134,8 @@ class CuTileSpec:
 
     launch_fn: Callable
     configs: Optional[List[Dict[str, Any]]] = None
-    input_formats: Optional[Any] = None
-    output_formats: Optional[Any] = None
+    input_formats: Optional[Sequence[int]] = None
+    output_formats: Optional[Sequence[int]] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def to_cache_key(self) -> tuple:
@@ -173,8 +173,8 @@ class CuTeDSLSpec:
     launch_fn: Callable
     configs: Optional[List[Dict[str, Any]]] = None
     arch: Optional[str] = None
-    input_formats: Optional[Any] = None
-    output_formats: Optional[Any] = None
+    input_formats: Optional[Sequence[int]] = None
+    output_formats: Optional[Sequence[int]] = None
     kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def to_cache_key(self) -> tuple:
@@ -370,14 +370,3 @@ def normalize_impl_to_spec(
     )
 
 
-def _custom_plugin_spec(
-    kernel: Union[
-        TritonSpec,
-        CuTileSpec,
-        CuTeDSLSpec,
-        List[Union[TritonSpec, CuTileSpec, CuTeDSLSpec]],
-    ],
-    meta_impl: Optional[Callable] = None,
-) -> KernelImplSpec:
-    """Internal factory: create a :class:`KernelImplSpec` wrapping one or more kernel specs."""
-    return KernelImplSpec(kernel=kernel, meta_impl=meta_impl)

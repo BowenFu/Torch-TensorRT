@@ -68,3 +68,23 @@ class TestSetTTALayerMetadata(unittest.TestCase):
         payload = parse_tta_layer_metadata(layer.metadata)
         self.assertIsNotNone(payload)
         self.assertEqual(payload["attrs"], {})
+
+    def test_fn_specs_encoded_and_parsed(self):
+        from torch_tensorrt.annotation._layer_metadata import _format_tta_metadata
+        from torch_tensorrt.annotation._layer_metadata import _parse_single_tta_segment
+        fn_specs = [("launch_add_one", {"BLOCK_SIZE": 128}), ("launch_add_one", {"BLOCK_SIZE": 256})]
+        raw = _format_tta_metadata("triton", "host_kernel_abc", "model.fc", fn_specs=fn_specs)
+        parsed = _parse_single_tta_segment(raw)
+        self.assertIsNotNone(parsed)
+        self.assertIn("fn_specs", parsed)
+        self.assertEqual(len(parsed["fn_specs"]), 2)
+        self.assertEqual(parsed["fn_specs"][0]["fn_name"], "launch_add_one")
+        self.assertEqual(parsed["fn_specs"][0]["config"]["BLOCK_SIZE"], 128)
+        self.assertEqual(parsed["fn_specs"][1]["config"]["BLOCK_SIZE"], 256)
+
+    def test_parse_returns_none_for_empty_torch_op(self):
+        from torch_tensorrt.annotation._layer_metadata import _parse_single_tta_segment
+        # A well-formed tier-1 string with an empty torch_op should return None.
+        raw = "tta triton:my_kernel attrs: torch_op:"
+        result = _parse_single_tta_segment(raw)
+        self.assertIsNone(result)
