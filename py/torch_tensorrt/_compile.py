@@ -320,6 +320,12 @@ def compile(
                 kwarg_inputs=torchtrt_kwarg_inputs,
                 **kwargs,
             )
+        # Run post-trace hooks.
+        from torch_tensorrt.dynamo._compiler import _post_trace_hooks
+        for _hook in _post_trace_hooks:
+            _result = _hook(exp_program, torchtrt_arg_inputs)
+            if _result is not None:
+                exp_program = _result
         trt_graph_module = dynamo_compile(
             exp_program,
             arg_inputs=torchtrt_arg_inputs,

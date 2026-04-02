@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import ExitStack
 from inspect import signature
 from typing import Any, Optional, Tuple, Union
 
@@ -76,13 +77,17 @@ def trace(
     # Constructing dynamic shape list as a nested dict
     dynamic_shapes = get_dynamic_shapes_args(mod, arg_inputs)
     dynamic_shapes.update(get_dynamic_shapes_kwargs(kwarg_inputs))
-    exp_program = export(
-        mod,
-        tuple(torch_arg_inputs),
-        kwargs=torch_kwarg_inputs,
-        dynamic_shapes=dynamic_shapes,
-        strict=kwargs.get("strict", False),
-    )
+    from torch_tensorrt.dynamo._compiler import _export_context_factories
+    with ExitStack() as _stack:
+        for _factory in _export_context_factories:
+            _stack.enter_context(_factory(mod, tuple(torch_arg_inputs)))
+        exp_program = export(
+            mod,
+            tuple(torch_arg_inputs),
+            kwargs=torch_kwarg_inputs,
+            dynamic_shapes=dynamic_shapes,
+            strict=kwargs.get("strict", False),
+        )
 
     return exp_program
 

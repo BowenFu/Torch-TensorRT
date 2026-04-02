@@ -5,7 +5,7 @@ import logging
 import os
 import platform
 import warnings
-from typing import Any, Collection, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Collection, List, Optional, Sequence, Set, Tuple, Union
 
 import torch
 from torch.export import ExportedProgram
@@ -55,6 +55,34 @@ from torch_tensorrt.dynamo.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Extension hook registries — populated at import time by external modules
+# (e.g. torch_tensorrt.annotation).  torch_tensorrt itself never imports
+# those modules; they register themselves here instead.
+_compile_passes: List[Callable] = []
+_preserved_ep_attrs: List[str] = []
+_export_context_factories: List[Callable] = []
+_post_trace_hooks: List[Callable] = []
+
+
+def register_compile_pass(fn: Callable) -> None:
+    """Register a pre-TRT FX pass called after post_lowering."""
+    _compile_passes.append(fn)
+
+
+def register_preserved_ep_attr(name: str) -> None:
+    """Preserve a custom ExportedProgram attribute across run_decompositions()."""
+    _preserved_ep_attrs.append(name)
+
+
+def register_export_context(fn: Callable) -> None:
+    """Register a context factory ``fn(model, inputs)`` wrapping torch.export.export."""
+    _export_context_factories.append(fn)
+
+
+def register_post_trace_hook(fn: Callable) -> None:
+    """Register a hook called after torch.export and before TRT compilation."""
+    _post_trace_hooks.append(fn)
 
 
 @needs_cross_compile  # type: ignore[misc]
@@ -369,9 +397,15 @@ def cross_compile_for_windows(
     settings = CompilationSettings(**compilation_options)
     logger.info("Compilation Settings: %s\n", settings)
     exported_program = pre_export_lowering(exported_program, settings)
+    _saved_ep_attrs = {k: getattr(exported_program, k) for k in _preserved_ep_attrs if hasattr(exported_program, k)}
     exported_program = exported_program.run_decompositions(
         get_decompositions(enable_experimental_decompositions, decompose_attention)
     )
+    for k, v in _saved_ep_attrs.items():
+        try:
+            setattr(exported_program, k, v)
+        except Exception:
+            pass
 
     gm = exported_program.module()
     logger.debug("Input graph: " + str(gm.graph))
@@ -381,6 +415,10 @@ def cross_compile_for_windows(
     gm = post_lowering(gm, settings)
     logger.debug(f"CPU memory usage after post_lowering: {get_cpu_memory_usage()} MB")
     logger.debug("Lowered Input graph: " + str(gm.graph))
+    for _pass in _compile_passes:
+        _result = _pass(exported_program=exported_program, fx_module=gm, logger=logger)
+        if isinstance(_result, tuple):
+            exported_program, gm = _result
 
     # Move the weights in the state_dict to CPU
     if offload_module_to_cpu:
@@ -471,6 +509,7 @@ def compile(
     enable_resource_partitioning: bool = _defaults.ENABLE_RESOURCE_PARTITIONING,
     dynamically_allocate_resources: bool = _defaults.DYNAMICALLY_ALLOCATE_RESOURCES,
     decompose_attention: bool = _defaults.DECOMPOSE_ATTENTION,
+    profiling_verbosity: Optional[Any] = None,
     **kwargs: Any,
 ) -> torch.fx.GraphModule:
     """Compile an ExportedProgram module for NVIDIA GPUs using TensorRT
@@ -764,13 +803,21 @@ def compile(
         "dynamically_allocate_resources": dynamically_allocate_resources,
         "decompose_attention": decompose_attention,
     }
+    if profiling_verbosity is not None:
+        compilation_options["profiling_verbosity"] = profiling_verbosity
     logger.debug(f"CPU memory usage before lowering: {get_cpu_memory_usage()} MB")
     settings = CompilationSettings(**compilation_options)
     logger.info("Compilation Settings: %s\n", settings)
     exported_program = pre_export_lowering(exported_program, settings)
+    _saved_ep_attrs = {k: getattr(exported_program, k) for k in _preserved_ep_attrs if hasattr(exported_program, k)}
     exported_program = exported_program.run_decompositions(
         get_decompositions(enable_experimental_decompositions, decompose_attention)
     )
+    for k, v in _saved_ep_attrs.items():
+        try:
+            setattr(exported_program, k, v)
+        except Exception:
+            pass
 
     gm = exported_program.module()
     # Move the weights in the state_dict to CPU
@@ -781,6 +828,10 @@ def compile(
     gm = post_lowering(gm, settings)
     logger.debug(f"CPU memory usage after post_lowering: {get_cpu_memory_usage()} MB")
     logger.debug("Lowered Input graph: " + str(gm.graph))
+    for _pass in _compile_passes:
+        _result = _pass(exported_program=exported_program, fx_module=gm, logger=logger)
+        if isinstance(_result, tuple):
+            exported_program, gm = _result
 
     # Move the weights in the state_dict to CPU
     if offload_module_to_cpu:
@@ -1417,9 +1468,15 @@ def convert_exported_program_to_serialized_trt_engine(
     settings = CompilationSettings(**compilation_options)
     logger.info("Compilation Settings: %s\n", settings)
     exported_program = pre_export_lowering(exported_program, settings)
+    _saved_ep_attrs = {k: getattr(exported_program, k) for k in _preserved_ep_attrs if hasattr(exported_program, k)}
     exported_program = exported_program.run_decompositions(
         get_decompositions(enable_experimental_decompositions, decompose_attention)
     )
+    for k, v in _saved_ep_attrs.items():
+        try:
+            setattr(exported_program, k, v)
+        except Exception:
+            pass
 
     gm = exported_program.module()
     # Move the weights in the state_dict to CPU
@@ -1428,6 +1485,10 @@ def convert_exported_program_to_serialized_trt_engine(
     # Apply lowering on the graph module
     gm = post_lowering(gm, settings)
     logger.debug("Lowered Input graph: " + str(gm.graph))
+    for _pass in _compile_passes:
+        _result = _pass(exported_program=exported_program, fx_module=gm, logger=logger)
+        if isinstance(_result, tuple):
+            exported_program, gm = _result
 
     # Move the weights in the state_dict to CPU
     if offload_module_to_cpu:

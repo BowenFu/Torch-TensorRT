@@ -108,6 +108,9 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
                 )
                 flag |= STRONGLY_TYPED
 
+        if hasattr(trt.NetworkDefinitionCreationFlag, "PREFER_AOT_PYTHON_PLUGINS"):
+            flag |= 1 << int(trt.NetworkDefinitionCreationFlag.PREFER_AOT_PYTHON_PLUGINS)
+
         self.ctx = ConversionContext(
             self.builder.create_network(flag), compilation_settings
         )
@@ -234,10 +237,15 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
             )
 
         if is_tensorrt_version_supported("8.2"):
+            _pv = getattr(self.compilation_settings, "profiling_verbosity", None)
             builder_config.profiling_verbosity = (
-                trt.ProfilingVerbosity.DETAILED
-                if self._debugger_config and self._debugger_config.save_engine_profile
-                else trt.ProfilingVerbosity.LAYER_NAMES_ONLY
+                _pv
+                if _pv is not None
+                else (
+                    trt.ProfilingVerbosity.DETAILED
+                    if self._debugger_config and self._debugger_config.save_engine_profile
+                    else trt.ProfilingVerbosity.LAYER_NAMES_ONLY
+                )
             )
 
         if is_tensorrt_version_supported("8.6"):
@@ -665,13 +673,25 @@ class TRTInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     def run_node(self, n: torch.fx.Node) -> torch.fx.Node:
         self._cur_node_name = get_node_name(n)
         self._cur_node = n
+        self.ctx.current_node = n
 
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug(
                 f"Converting node {self._cur_node_name} (kind: {n.target}, args: {TRTInterpreter._args_str(n.args)})"
             )
 
+        _layers_before = self.ctx.net.num_layers
         trt_node: torch.fx.Node = super().run_node(n)
+
+        _layer_meta = n.meta.get("layer_metadata") if n.meta else None
+        if _layer_meta:
+            for _li in range(_layers_before, self.ctx.net.num_layers):
+                try:
+                    _layer = self.ctx.net[_li]
+                    if not getattr(_layer, "metadata", None):
+                        _layer.metadata = _layer_meta
+                except Exception:
+                    pass
 
         if n.op == "get_attr":
             self.const_mapping[str(n)] = (tuple(trt_node.shape), str(trt_node.dtype))
