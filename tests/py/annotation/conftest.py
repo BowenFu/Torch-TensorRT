@@ -40,24 +40,6 @@ _py_dir = os.path.join(_repo_root, "py")
 if os.path.isdir(_py_dir) and _py_dir not in sys.path:
     sys.path.insert(0, _py_dir)
 
-_CUDNN_TEST_FILES = [
-    os.path.join(os.path.dirname(__file__), "e2e", "test_plugin_e2e.py"),
-    os.path.join(os.path.dirname(__file__), "e2e", "test_cudnn_plugin_e2e.py"),
-]
-
-
-def _ensure_cudnn_on_ld_path():
-    for p in sys.path:
-        if "site-packages" not in str(p):
-            continue
-        cudnn_lib = os.path.join(p, "nvidia", "cudnn", "lib")
-        if os.path.isdir(cudnn_lib):
-            lp = os.environ.get("LD_LIBRARY_PATH", "")
-            if cudnn_lib not in lp:
-                os.environ["LD_LIBRARY_PATH"] = cudnn_lib + (":" + lp if lp else "")
-            return
-
-
 def _ensure_cublas_on_ld_path():
     for p in sys.path:
         if "site-packages" not in str(p):
@@ -114,26 +96,19 @@ def _gpu_map_nvsmi():
     return bw_uuids, pre_uuids
 
 
-_IS_CUDNN_SUBPROCESS = os.environ.get("_TTA_CUDNN_SUBPROCESS") == "1"
 _IS_PRE_BW_SUBPROCESS = os.environ.get("_TTA_PRE_BW_SUBPROCESS") == "1"
 
 _BW_GPUS, _PRE_BW_GPUS = _gpu_map_nvsmi()
 
 _ensure_cublas_on_ld_path()
 
-if _IS_CUDNN_SUBPROCESS:
-    _ensure_cudnn_on_ld_path()
-
 collect_ignore: list = []
 if _IS_PRE_BW_SUBPROCESS:
-    # Pre-BW subprocess: always hide CuDNN tests (no CuDNN lib setup here).
-    collect_ignore.extend(f for f in _CUDNN_TEST_FILES if os.path.isfile(f))
     # Pin to a pre-Blackwell GPU if the caller did not already set one.
     if "CUDA_VISIBLE_DEVICES" not in os.environ and _PRE_BW_GPUS:
         os.environ["CUDA_VISIBLE_DEVICES"] = _PRE_BW_GPUS[0]
-elif not _IS_CUDNN_SUBPROCESS and _BW_GPUS:
-    # Main run on Blackwell: hide CuDNN tests + pin to Blackwell GPUs.
-    collect_ignore.extend(f for f in _CUDNN_TEST_FILES if os.path.isfile(f))
+elif _BW_GPUS:
+    # Main run on Blackwell: pin to Blackwell GPUs.
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(_BW_GPUS)
 
 
@@ -146,7 +121,7 @@ def pytest_runtest_setup(item):
 
     They will be re-executed on a pre-Blackwell GPU in pytest_sessionfinish.
     """
-    if _IS_PRE_BW_SUBPROCESS or _IS_CUDNN_SUBPROCESS:
+    if _IS_PRE_BW_SUBPROCESS:
         return
     if not _BW_GPUS:
         return  # no Blackwell GPU — run everything here
@@ -206,7 +181,7 @@ def _session_timing_cache():
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if _IS_CUDNN_SUBPROCESS or _IS_PRE_BW_SUBPROCESS or not _PRE_BW_GPUS:
+    if _IS_PRE_BW_SUBPROCESS or not _PRE_BW_GPUS:
         return
 
     # --- requires_pre_bw tests ---
@@ -232,25 +207,3 @@ def pytest_sessionfinish(session, exitstatus):
         result = subprocess.run(cmd, env=env, cwd=str(session.config.rootpath))
         if result.returncode != 0 and exitstatus == 0:
             session.exitstatus = result.returncode
-
-    # --- CuDNN tests (run only when explicitly requested) ---
-    args = getattr(session.config.invocation_params, "args", []) or []
-    requested_cudnn = any(
-        str(a).endswith("test_plugin_e2e.py") or str(a).endswith("test_cudnn_plugin_e2e.py")
-        for a in args
-    )
-    if not requested_cudnn:
-        return
-
-    targets = [f for f in _CUDNN_TEST_FILES if os.path.isfile(f)]
-    if not targets:
-        return
-
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = _PRE_BW_GPUS[0]
-    env["_TTA_CUDNN_SUBPROCESS"] = "1"
-    _ensure_cudnn_on_ld_path()
-    cmd = [sys.executable, "-m", "pytest", "-v", "--tb=short"] + targets
-    result = subprocess.run(cmd, env=env, cwd=str(session.config.rootpath))
-    if result.returncode != 0 and exitstatus == 0:
-        session.exitstatus = result.returncode

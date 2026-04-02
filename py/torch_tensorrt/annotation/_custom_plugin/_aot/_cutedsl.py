@@ -286,30 +286,6 @@ def aot_impl_cutedsl(
     return kernel_name_str, ptx_bytes, launch, extra_args
 
 
-def _make_compile_wrapper(launch_fn: Any, options: str = "") -> Any:
-    """Return a callable that invokes cute.compile(launch_fn, *tensors, **kwargs).
-
-    Wraps the cute.compile call so callers can swap compile backends in tests
-    without importing cutlass.cute at the call site.  The wrapper is callable:
-    ``wrapper(*cute_tensors, **cfg_kwargs) -> compiled``.
-    """
-
-    def _wrapper(*cute_tensors: Any, **cfg_kwargs: Any) -> Any:
-        try:
-            import cutlass.cute as cute
-        except ImportError as exc:
-            raise TTAPluginError(
-                op=getattr(launch_fn, "__name__", "<unknown>"),
-                stage="compile",
-                backend="cutedsl",
-                msg=f"cutlass.cute not available: {exc}",
-            ) from exc
-        compile_opts = options
-        return cute.compile(launch_fn, *cute_tensors, options=compile_opts, **cfg_kwargs)
-
-    return _wrapper
-
-
 def compile_cutedsl_kernel(
     spec: CuTeDSLSpec, config: Dict[str, Any]
 ) -> AOTMetadata:

@@ -533,55 +533,9 @@ def _build_input_params(num_inputs: int, annotation: Any) -> List[inspect.Parame
     ]
 
 
-def _build_attr_params(attrs: Dict[str, Any]) -> List[inspect.Parameter]:
-    """Build an ``inspect.Parameter`` list for QDP plugin field attributes.
-
-    Maps Python value types to the type annotations that TRT's ``@trtp.register``
-    validation expects.  Supported primitive types: ``int``, ``float``, ``str``,
-    ``bool``.  Any other type falls back to its own ``type()`` as the annotation.
-
-    Args:
-        attrs: Mapping of attribute name to scalar value.
-
-    Returns:
-        List of ``inspect.Parameter`` objects, one per entry in ``attrs``.
-    """
-    _type_map = {bool: bool, int: int, float: float, str: str}
-    params = []
-    for name, value in attrs.items():
-        ann = _type_map.get(type(value), type(value))
-        params.append(
-            inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=ann)
-        )
-    return params
-
-
 # ---------------------------------------------------------------------------
 # Descriptor function builder (shape / dtype via @trtp.register)
 # ---------------------------------------------------------------------------
-
-
-def _build_identity_desc_fn(num_outputs: int) -> Callable[..., Any]:
-    """Build a no-``meta_impl`` descriptor that mirrors ``inp0``'s shape/dtype for all outputs.
-
-    Used when ``meta_impl`` is ``None``.  All output ``TensorDesc`` s are produced
-    with ``inp0.like()``, giving each output the same dtype, shape, and format as
-    the first input.
-
-    Args:
-        num_outputs: Number of output tensors to produce.
-
-    Returns:
-        A callable suitable for use as the body of a ``@trtp.register`` function.
-    """
-    _num_outputs = num_outputs
-
-    def _desc(*args: Any) -> Any:  # type: ignore[misc]
-        if _num_outputs == 1:
-            return args[0].like()
-        return tuple(args[0].like() for _ in range(_num_outputs))
-
-    return _desc
 
 
 def _is_symbolic_shape_expr(shape_expr: Any) -> bool:

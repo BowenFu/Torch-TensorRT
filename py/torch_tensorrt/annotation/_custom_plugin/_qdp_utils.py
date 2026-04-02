@@ -252,13 +252,6 @@ def is_cutile_program(obj: Any) -> bool:
     return callable(obj) and ("cuda.tile" in modname or "cutile" in modname)
 
 
-def is_cutedsl_compile_fn(obj: Any) -> bool:
-    """Heuristic: CuTe DSL compile entry-point."""
-    name = getattr(obj, "__name__", "")
-    modname = getattr(obj, "__module__", "")
-    return name == "compile" and ("cute" in modname or "cutlass" in modname)
-
-
 def is_cute_kernel(obj: Any) -> bool:
     """Heuristic: @cute.kernel objects from CUTLASS CuTe DSL.
 
@@ -384,19 +377,6 @@ _MAX_DIM = 2**31 - 1
 _MIN_VALID_DIM = 1
 
 
-def dtype_token(td: Any) -> str:
-    """Return a short string token for a TensorDesc dtype."""
-    if td.dtype == trt.float16:
-        return "FP16"
-    if td.dtype == trt.bfloat16:
-        return "BF16"
-    if td.dtype == trt.float32:
-        return "FP32"
-    if td.dtype == trt.int32:
-        return "INT32"
-    return "OTHER"
-
-
 def format_token(tf: Any) -> str:
     """Return a short string token for a trt.TensorFormat."""
     if tf == trt.TensorFormat.LINEAR:
@@ -426,41 +406,6 @@ def format_token(tf: Any) -> str:
     if tf == trt.TensorFormat.DHWC:
         return "DHWC"
     return str(tf)
-
-
-# LIMITATION: Format enumeration is informational only.  collect_allowed_formats_for_io
-# gathers the union of formats from all kernel specs, but _build_autotune_fn always
-# passes "LINEAR" to the AutoTuneCombination string constructor regardless of what
-# this function returns.  Non-linear packed formats (HWC8, CHW4, etc.) are therefore
-# never actually advertised to TRT's autotuner and will never be selected as the
-# layout for a plugin I/O tensor.  A full implementation would need to enumerate all
-# format combinations and register a separate tactic per combination.
-def collect_allowed_formats_for_io(
-    specs: Sequence[Any],
-    io_idx: int,
-    num_inputs: int,
-) -> List[str]:
-    """Collect the union of allowed TensorFormats for a given I/O position.
-
-    Returns format tokens (e.g. "LINEAR", "HWC8") for the union of formats
-    advertised by all specs at the given I/O index.  Currently used for
-    informational purposes; _build_autotune_fn uses "LINEAR" directly in the
-    AutoTuneCombination string constructor.
-    """
-    allowed: set[str] = set()
-    for spec in specs:
-        if io_idx < num_inputs:
-            fmt_list = spec.input_formats
-        else:
-            fmt_list = spec.output_formats
-        if fmt_list is None:
-            allowed.add("LINEAR")
-        else:
-            for f in fmt_list:
-                allowed.add(format_token(f))
-    if not allowed:
-        allowed.add("LINEAR")
-    return sorted(allowed)
 
 
 # ---- Shape expression utilities ----
@@ -723,17 +668,6 @@ def make_meta_tensor_from_td_symbolic(td: Any) -> torch.Tensor:
     shape = _shape_expr_to_meta_shape(td.shape_expr)
     torch_dtype = td_dtype_to_torch(td.dtype)
     return torch.empty(shape, dtype=torch_dtype, device="meta")
-
-
-def make_td_from_meta(t: torch.Tensor) -> Any:
-    """Create a QDP TensorDesc from a meta tensor using t.shape and t.dtype."""
-    shape = tuple(int(d) for d in t.shape)
-    dtype = torch_dtype_to_trt(t.dtype)
-    if _TRT_AVAILABLE:
-        shape_expr = [trtp.SymInt32(d) for d in shape]
-    else:
-        shape_expr = list(shape)
-    return trtp.TensorDesc(dtype=dtype, shape_expr=shape_expr)
 
 
 def _output_shape_to_shape_expr(shape: Tuple[Any, ...], symbolic: bool = False) -> List[Any]:

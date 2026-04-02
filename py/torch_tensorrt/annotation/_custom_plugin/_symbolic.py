@@ -278,11 +278,3 @@ class SymbolicTensor:
         return True
 
 
-def cdiv(a: Any, b: int) -> Any:
-    """Ceiling division on a SymInt32 by a Python int divisor.
-
-    Only the pattern SymInt32 // int is required by the contract.
-    """
-    if isinstance(b, int) and b <= 0:
-        raise ValueError(f"cdiv: divisor b must be a positive integer, got {b}")
-    return (a + (b - 1)) // b
