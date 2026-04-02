@@ -9,12 +9,11 @@ descriptors, without touching the GPU or requiring CUDA to be initialised.
 
 Each recorder mirrors the call protocol of its target backend:
 
-Backend         | Call protocol                              | Recorder class
-----------------|--------------------------------------------|--------------------
-Triton          | ``kernel[grid](*args, **kwargs)``          | TritonLaunchRecorder
-cuTILE          | ``prog(*args, **kwargs)``                  | CuTileLaunchRecorder
-CuTe DSL (run)  | ``compiled.run(*args, **kwargs)``          | CuTeRunRecorder
-CuTe DSL (kernel)| ``kernel(*args)(...).launch(grid, block)``| CuTeDSLKernelRecorder
+Backend   | Call protocol                              | Recorder class
+----------|--------------------------------------------|--------------------
+Triton    | ``kernel[grid](*args, **kwargs)``          | TritonLaunchRecorder
+cuTILE    | ``prog(*args, **kwargs)``                  | CuTileLaunchRecorder
+CuTe DSL  | ``kernel(*args)(...).launch(grid, block)`` | CuTeDSLKernelRecorder
 
 After the sandbox ``launch_fn`` returns, the autotune pass inspects the
 populated fields on the recorder instance to retrieve the captured
@@ -113,46 +112,6 @@ class CuTileLaunchRecorder:
             *args: Positional arguments forwarded to the cuTILE program.
             **kwargs: Keyword arguments forwarded to the cuTILE program.
         """
-        self.args = args
-        self.kwargs = kwargs
-
-
-@dataclass
-class CuTeRunRecorder:
-    """Proxy that records CuTe DSL ``compiled.run(...)`` calls.
-
-    Used in the autotune sandbox when a user's ``launch_fn`` calls
-    ``compiled.run(...)`` on a CuTe DSL compiled object.  The recorder
-    captures the ``compiled`` object and arguments so the autotune pass can
-    inspect them after the sandbox returns.
-
-    Unlike ``CuTeDSLKernelRecorder`` (which wraps a ``@cute.kernel``
-    decorator result), this recorder targets the lower-level
-    ``compiled.run`` API available on ``CuTeDSL`` compiled artifacts.
-
-    Attributes:
-        compiled: The CuTe DSL compiled object passed to ``record_run``.
-            ``None`` until ``record_run`` is called.
-        args: Positional arguments captured from ``compiled.run``.  ``None``
-            until ``record_run`` is called.
-        kwargs: Keyword arguments captured from ``compiled.run``.  ``None``
-            until ``record_run`` is called.
-    """
-
-    compiled: Any = None
-    args: Optional[Tuple[Any, ...]] = None
-    kwargs: Optional[Dict[str, Any]] = None
-
-    def record_run(self, compiled: Any, *args: Any, **kwargs: Any) -> None:
-        """Record a ``compiled.run(...)`` call.
-
-        Args:
-            compiled: The CuTe DSL compiled object whose ``run`` method was
-                called.
-            *args: Positional arguments forwarded to ``compiled.run``.
-            **kwargs: Keyword arguments forwarded to ``compiled.run``.
-        """
-        self.compiled = compiled
         self.args = args
         self.kwargs = kwargs
 
