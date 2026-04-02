@@ -333,5 +333,84 @@ class TestNormalizeImplToSpec(unittest.TestCase):
             tta.normalize_impl_to_spec(123)
 
 
+# ===========================================================================
+# AnnotationMetadata helpers
+# ===========================================================================
+
+class TestAnnotationMetadata(unittest.TestCase):
+    def test_attach_and_get_round_trip(self):
+        from torch_tensorrt.annotation._specs import (
+            AnnotationMetadata,
+            attach_annotation_metadata,
+            get_annotation_metadata,
+        )
+
+        def fn():
+            pass
+
+        meta = AnnotationMetadata(impl=None)
+        attach_annotation_metadata(fn, meta)
+        retrieved = get_annotation_metadata(fn)
+        self.assertIs(retrieved, meta)
+
+    def test_get_returns_none_when_absent(self):
+        from torch_tensorrt.annotation._specs import get_annotation_metadata
+
+        def fn():
+            pass
+
+        self.assertIsNone(get_annotation_metadata(fn))
+
+
+# ===========================================================================
+# KernelImplSpec
+# ===========================================================================
+
+class TestKernelImplSpec(unittest.TestCase):
+    def test_single_spec_cache_key(self):
+        def kernel(x, out):
+            pass
+
+        spec = tta.triton(kernel)
+        ki = tta.KernelImplSpec(kernel=spec)
+        key = ki.to_cache_key()
+        self.assertEqual(key[0], "custom_plugin")
+
+    def test_list_kernel_cache_key(self):
+        def k1(x, out):
+            pass
+
+        def k2(x, out):
+            pass
+
+        ki = tta.KernelImplSpec(kernel=[tta.triton(k1), tta.triton(k2)])
+        key = ki.to_cache_key()
+        self.assertEqual(key[0], "custom_plugin")
+        self.assertIsInstance(key[1], tuple)
+        self.assertEqual(len(key[1]), 2)
+
+    def test_empty_list_raises(self):
+        with self.assertRaises(ValueError):
+            tta.KernelImplSpec(kernel=[])
+
+    def test_invalid_item_in_list_raises(self):
+        def kernel(x, out):
+            pass
+
+        with self.assertRaises(TypeError):
+            tta.KernelImplSpec(kernel=[tta.triton(kernel), "bad"])
+
+    def test_invalid_kernel_type_raises(self):
+        with self.assertRaises(TypeError):
+            tta.KernelImplSpec(kernel="not_a_spec")
+
+    def test_non_callable_meta_impl_raises(self):
+        def kernel(x, out):
+            pass
+
+        with self.assertRaises(TypeError):
+            tta.KernelImplSpec(kernel=tta.triton(kernel), meta_impl="not_callable")
+
+
 if __name__ == "__main__":
     unittest.main()
