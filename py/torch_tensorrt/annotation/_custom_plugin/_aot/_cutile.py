@@ -147,13 +147,6 @@ def _extract_ptx_from_cubin(cubin_bytes: bytes) -> Optional[str]:
     depth = 0
     end = -1
     scan_limit = min(open_brace + 500_000, len(cubin_bytes))
-    if open_brace + 500_000 < len(cubin_bytes):
-        logger.debug(
-            "_extract_ptx_from_cubin: kernel body may exceed 500 KB scan limit; "
-            "CUBIN size=%d, scan_limit=%d — increase limit if kernel is not extracted",
-            len(cubin_bytes),
-            scan_limit,
-        )
     for i in range(open_brace, scan_limit):
         c = cubin_bytes[i]
         if c == ord("{"):
@@ -493,17 +486,13 @@ def aot_impl_cutile(
         ) from exc
 
     # Ensure tileiras is findable: add the Python-packaged nvidia/cu13/bin if needed.
-    # Scope the PATH mutation so it's restored after compilation even on failure.
     import shutil as _shutil
     import sysconfig as _sysconfig
-    _old_path = os.environ.get("PATH", "")
-    _path_modified = False
     if not _shutil.which("tileiras"):
         _site = _sysconfig.get_path("platlib")
         _cu13_bin = os.path.join(_site, "nvidia", "cu13", "bin")
-        if os.path.isdir(_cu13_bin) and _cu13_bin not in _old_path:
-            os.environ["PATH"] = _cu13_bin + os.pathsep + _old_path
-            _path_modified = True
+        if os.path.isdir(_cu13_bin) and _cu13_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _cu13_bin + os.pathsep + os.environ.get("PATH", "")
 
     all_descs = list(inp_descs) + list(out_descs)
     num_inputs = len(inp_descs)
@@ -562,19 +551,10 @@ def aot_impl_cutile(
                 backend=backend,
                 msg=f"cuTILE compilation failed: {exc}",
             ) from exc
-    finally:
-        if _path_modified:
-            os.environ["PATH"] = _old_path
 
     if hasattr(result, "fname_cubin"):
-        try:
-            with open(result.fname_cubin, "rb") as f:
-                cubin_bytes = f.read()
-        finally:
-            try:
-                os.unlink(result.fname_cubin)
-            except OSError:
-                pass
+        with open(result.fname_cubin, "rb") as f:
+            cubin_bytes = f.read()
         kernel_name_str = getattr(result, "func_name", None) or getattr(real_prog, "__name__", None) or "cutile_kernel"
     elif isinstance(result, bytes):
         cubin_bytes = result
@@ -717,11 +697,7 @@ def aot_impl_cutile(
             is_ptx = True
         if is_ptx:
             ptx_str_out = code_out.decode("utf-8", errors="replace")
-            ptx_str_out = re.sub(
-                r"(\.entry\s+)" + re.escape(kernel_name_str) + r"(\s*\()",
-                r"\g<1>" + unique_name + r"\2",
-                ptx_str_out,
-            )
+            ptx_str_out = ptx_str_out.replace(kernel_name_str, unique_name)
             code_out = ptx_str_out.encode("utf-8")
             kernel_name_str = unique_name
         else:
@@ -777,15 +753,5 @@ def compile_cutile_program(spec: CuTileSpec, config: Dict[str, Any]) -> AOTMetad
         out_descs=out_descs,
     )
     program_name = kernel_name_bytes.decode("utf-8") if isinstance(kernel_name_bytes, bytes) else kernel_name_bytes
-    param_binding_indices, _ = analyze_launch_args(
-        args=host_args,
-        num_inputs=len(inp_descs),
-        num_outputs=len(out_descs),
-        op="cutile_compile",
-        backend="cutile",
-    )
-    launch_params = _launch_params_from_trt(
-        launch, extra_args, num_inputs=1, num_outputs=1,
-        param_binding_indices=param_binding_indices,
-    )
+    launch_params = _launch_params_from_trt(launch, extra_args, num_inputs=1, num_outputs=1)
     return AOTMetadata(binary=code_bytes, kernel_name=program_name, launch_params=launch_params, backend="cutile")

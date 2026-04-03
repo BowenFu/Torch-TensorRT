@@ -33,12 +33,8 @@ The public entry-point is ``aot_impl_cutedsl``, which returns the QDP AOT 4-tupl
 """
 from __future__ import annotations
 
-import logging
-import shutil
 import tempfile
 from typing import Any, Dict, List, Mapping, Optional, Tuple
-
-logger = logging.getLogger(__name__)
 
 try:
     import tensorrt as trt
@@ -56,7 +52,6 @@ from .._qdp_utils import (
     _as_symint32,
     _launch_params_from_trt,
     _safe_dim,
-    analyze_launch_args,
     is_cute_kernel,
     run_kernel_sandbox,
     td_dtype_to_torch,
@@ -129,24 +124,15 @@ def aot_impl_cutedsl(
     recorded_block: Optional[Tuple[Any, ...]] = None
 
     raw_fn = _get_jit_raw_fn(launch_fn)
-    try:
-        used_recorder, _ = run_kernel_sandbox(
-            launch_fn=launch_fn,
-            host_args=host_args,
-            is_kernel_fn=is_cute_kernel,
-            recorder_factory=lambda obj: CuTeDSLKernelRecorder(real_kernel=obj),
-            raw_fn=raw_fn,
-            host_kwargs=dict(cfg, **(attrs or {})) if cfg or attrs else None,
-            strict=False,
-        )
-    except Exception as exc:
-        logger.warning(
-            "CuTeDSL AOT sandbox failed for %r; falling back to static grid (1,1,1). "
-            "Kernel will launch with incorrect grid — provide a launch_fn whose grid "
-            "is computable from SymbolicTensor shapes. Error: %s",
-            qdp_symbol, exc,
-        )
-        used_recorder = None
+    used_recorder, _ = run_kernel_sandbox(
+        launch_fn=launch_fn,
+        host_args=host_args,
+        is_kernel_fn=is_cute_kernel,
+        recorder_factory=lambda obj: CuTeDSLKernelRecorder(real_kernel=obj),
+        raw_fn=raw_fn,
+        host_kwargs=dict(cfg, **(attrs or {})) if cfg or attrs else None,
+        strict=False,
+    )
     if used_recorder is not None:
         recorded_grid = used_recorder.grid
         recorded_block = used_recorder.block
@@ -161,58 +147,55 @@ def aot_impl_cutedsl(
 
     cute_tensors = [from_dlpack(t) for t in dummy_tensors]
 
-    # 3. Compile inside a temp directory that is always cleaned up on exit.
-    tmp_dir = tempfile.mkdtemp(prefix="cutedsl_aot_")
+    # 3. Compile.
+    dump_dir = tempfile.mkdtemp(prefix="cutedsl_aot_", dir="/tmp")
+    compile_opts = f"--dump-dir={dump_dir} --keep-cubin --keep-ptx"
+
+    # Pass cfg as kwargs so config constants (e.g. BLOCK_SIZE) are compile-time
+    # values in the PTX, enabling nvvm.reqntid and correct per-tactic block sizes.
+    compile_kwargs = dict(cfg) if cfg else {}
+    # cute.compile can raise RuntimeError, subprocess.CalledProcessError, or
+    # arbitrary Exception subclasses from NVCC/NVVM; a broad catch is necessary
+    # to wrap all failures in a structured diagnostic.
     try:
-        compile_opts = f"--dump-dir={tmp_dir} --keep-cubin --keep-ptx"
+        compiled = cute.compile(launch_fn, *cute_tensors, options=compile_opts, **compile_kwargs)
+    except Exception as exc:
+        raise TTAPluginError(
+            op=qdp_symbol,
+            stage="aot_impl",
+            backend=backend,
+            msg=f"cute.compile failed for op '{qdp_symbol}': {exc}",
+        ) from exc
 
-        # Pass cfg as kwargs so config constants (e.g. BLOCK_SIZE) are compile-time
-        # values in the PTX, enabling nvvm.reqntid and correct per-tactic block sizes.
-        compile_kwargs = dict(cfg) if cfg else {}
-        # cute.compile can raise RuntimeError, subprocess.CalledProcessError, or
-        # arbitrary Exception subclasses from NVCC/NVVM; a broad catch is necessary
-        # to wrap all failures in a structured diagnostic.
-        try:
-            compiled = cute.compile(launch_fn, *cute_tensors, options=compile_opts, **compile_kwargs)
-        except Exception as exc:
-            raise TTAPluginError(
-                op=qdp_symbol,
-                stage="aot_impl",
-                backend=backend,
-                msg=f"cute.compile failed for op '{qdp_symbol}': {exc}",
-            ) from exc
+    if not hasattr(compiled, "artifacts") or not hasattr(compiled.artifacts, "PTX"):
+        raise TTAPluginError(
+            op=qdp_symbol,
+            stage="aot_impl",
+            backend=backend,
+            msg=(
+                f"compiled object (type {type(compiled).__name__}) has no "
+                f"artifacts.PTX attribute"
+            ),
+        )
 
-        if not hasattr(compiled, "artifacts") or not hasattr(compiled.artifacts, "PTX"):
-            raise TTAPluginError(
-                op=qdp_symbol,
-                stage="aot_impl",
-                backend=backend,
-                msg=(
-                    f"compiled object (type {type(compiled).__name__}) has no "
-                    f"artifacts.PTX attribute"
-                ),
-            )
+    ptx_str = compiled.artifacts.PTX
+    if not ptx_str or ".entry" not in ptx_str:
+        raise TTAPluginError(
+            op=qdp_symbol,
+            stage="aot_impl",
+            backend=backend,
+            msg="compiled PTX is empty or has no .entry kernel",
+        )
 
-        ptx_str = compiled.artifacts.PTX
-        if not ptx_str or ".entry" not in ptx_str:
-            raise TTAPluginError(
-                op=qdp_symbol,
-                stage="aot_impl",
-                backend=backend,
-                msg="compiled PTX is empty or has no .entry kernel",
-            )
-
-        kernel_names = list(compiled.kernel_info.keys())
-        if not kernel_names:
-            raise TTAPluginError(
-                op=qdp_symbol,
-                stage="aot_impl",
-                backend=backend,
-                msg="compiled object has no kernel names in kernel_info",
-            )
-        kernel_name_str = kernel_names[0]
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    kernel_names = list(compiled.kernel_info.keys())
+    if not kernel_names:
+        raise TTAPluginError(
+            op=qdp_symbol,
+            stage="aot_impl",
+            backend=backend,
+            msg="compiled object has no kernel names in kernel_info",
+        )
+    kernel_name_str = kernel_names[0]
 
     # 4. Build KernelLaunchParams using the recorded (symbolic) grid.
     launch = trtp.KernelLaunchParams()
@@ -221,69 +204,48 @@ def aot_impl_cutedsl(
         launch.grid_y = _as_symint32(recorded_grid[1]) if len(recorded_grid) > 1 else trtp.SymInt32(1)
         launch.grid_z = _as_symint32(recorded_grid[2]) if len(recorded_grid) > 2 else trtp.SymInt32(1)
     else:
-        logger.warning(
-            "CuTeDSL AOT sandbox failed for %r; falling back to static grid (1,1,1). "
-            "Kernel will launch with incorrect grid — provide a launch_fn whose grid "
-            "is computable from SymbolicTensor shapes. Error: %s",
-            qdp_symbol, "recorded_grid is None or empty",
-        )
         launch.grid_x = trtp.SymInt32(1)
         launch.grid_y = trtp.SymInt32(1)
         launch.grid_z = trtp.SymInt32(1)
 
     if recorded_block is not None and len(recorded_block) >= 1:
-        if isinstance(recorded_block[0], int):
-            launch.block_x = recorded_block[0]
-        else:
-            logger.warning(
-                "CuTeDSL block dimension is not a concrete int (got %r); "
-                "falling back to block_size=1 which may be incorrect.",
-                recorded_block[0],
-            )
-            launch.block_x = 1
-        if len(recorded_block) > 1:
-            if isinstance(recorded_block[1], int):
-                launch.block_y = recorded_block[1]
-            else:
-                logger.warning(
-                    "CuTeDSL block dimension is not a concrete int (got %r); "
-                    "falling back to block_size=1 which may be incorrect.",
-                    recorded_block[1],
-                )
-                launch.block_y = 1
-        else:
-            launch.block_y = 1
-        if len(recorded_block) > 2:
-            if isinstance(recorded_block[2], int):
-                launch.block_z = recorded_block[2]
-            else:
-                logger.warning(
-                    "CuTeDSL block dimension is not a concrete int (got %r); "
-                    "falling back to block_size=1 which may be incorrect.",
-                    recorded_block[2],
-                )
-                launch.block_z = 1
-        else:
-            launch.block_z = 1
+        launch.block_x = recorded_block[0] if isinstance(recorded_block[0], int) else 1
+        launch.block_y = recorded_block[1] if len(recorded_block) > 1 and isinstance(recorded_block[1], int) else 1
+        launch.block_z = recorded_block[2] if len(recorded_block) > 2 and isinstance(recorded_block[2], int) else 1
     else:
         launch.block_x = 1
         launch.block_y = 1
         launch.block_z = 1
     launch.shared_mem = 0
 
-    # Build SymIntExprs from the recorded symbolic grid so TRT can evaluate the
-    # launch configuration at runtime for dynamic-shape engines.
-    # Fall back to SymIntExprs(0) only if no grid was recorded.
-    grid_symints = recorded_grid if (recorded_grid is not None and len(recorded_grid) > 0) else None
-    if grid_symints:
-        extra_args = trtp.SymIntExprs(len(grid_symints))
-        for i, g in enumerate(grid_symints):
-            extra_args[i] = _as_symint32(g)
-    else:
-        extra_args = trtp.SymIntExprs(0)
+    extra_args = trtp.SymIntExprs(0)
 
     ptx_bytes = ptx_str.encode("utf-8")
     return kernel_name_str, ptx_bytes, launch, extra_args
+
+
+def _make_compile_wrapper(launch_fn: Any, options: str = "") -> Any:
+    """Return a callable that invokes cute.compile(launch_fn, *tensors, **kwargs).
+
+    Wraps the cute.compile call so callers can swap compile backends in tests
+    without importing cutlass.cute at the call site.  The wrapper is callable:
+    ``wrapper(*cute_tensors, **cfg_kwargs) -> compiled``.
+    """
+
+    def _wrapper(*cute_tensors: Any, **cfg_kwargs: Any) -> Any:
+        try:
+            import cutlass.cute as cute
+        except ImportError as exc:
+            raise TTAPluginError(
+                op=getattr(launch_fn, "__name__", "<unknown>"),
+                stage="compile",
+                backend="cutedsl",
+                msg=f"cutlass.cute not available: {exc}",
+            ) from exc
+        compile_opts = options
+        return cute.compile(launch_fn, *cute_tensors, options=compile_opts, **cfg_kwargs)
+
+    return _wrapper
 
 
 def compile_cutedsl_kernel(
@@ -327,15 +289,5 @@ def compile_cutedsl_kernel(
         if isinstance(kernel_name_bytes, bytes)
         else kernel_name_bytes
     )
-    param_binding_indices, _ = analyze_launch_args(
-        args=host_args,
-        num_inputs=len(inp_descs),
-        num_outputs=len(out_descs),
-        op="cutedsl_compile",
-        backend="cutedsl",
-    )
-    launch_params = _launch_params_from_trt(
-        launch, extra_args, num_inputs=len(inp_descs), num_outputs=len(out_descs),
-        param_binding_indices=param_binding_indices,
-    )
+    launch_params = _launch_params_from_trt(launch, extra_args, num_inputs=1, num_outputs=1)
     return AOTMetadata(binary=ptx_bytes, kernel_name=kernel_name, launch_params=launch_params, backend="cutedsl")

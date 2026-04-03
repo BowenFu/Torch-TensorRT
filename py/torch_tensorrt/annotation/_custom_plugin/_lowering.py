@@ -33,8 +33,7 @@ Dependencies
 
 from __future__ import annotations
 
-import dataclasses
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------------
 # Mandatory TRT import — this module is only used inside the TRT compile path
@@ -125,7 +124,7 @@ def lower_custom_plugin(
     spec: _SpecOrDescriptor,
     trt_inputs: List[trt.ITensor],
     name: str,
-) -> "_LoweringOutput":
+) -> _LoweringOutput:
     """Lower a custom plugin spec/descriptor to a TRT ``IPluginV3`` layer.
 
     This is the primary entry-point called by the TTA converter
@@ -216,7 +215,13 @@ def register_custom_plugin_qdp(
 
     # Shallow-clone the descriptor with the explicit op name so that the
     # caller's original descriptor (with its auto-computed fingerprint name)
-    # is preserved unchanged.  Using dataclasses.replace() ensures any new
-    # fields added to CustomPluginSpec are automatically copied.
-    named_descriptor = dataclasses.replace(descriptor, op_name=op_name)
-    register_custom_plugin(named_descriptor, num_inputs, num_outputs=named_descriptor.num_outputs)
+    # is preserved unchanged.
+    named_descriptor = CustomPluginSpec(
+        op_name=op_name,
+        specs=descriptor.specs,
+        meta_impl=descriptor.meta_impl,
+        attrs=descriptor.attrs,
+        weights=descriptor.weights,
+
+    )
+    register_custom_plugin(named_descriptor, num_inputs)

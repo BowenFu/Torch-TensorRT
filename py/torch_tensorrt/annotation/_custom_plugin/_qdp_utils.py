@@ -225,7 +225,7 @@ def derive_impl_id(
 
 def make_qdp_symbol(impl_id: str) -> str:
     """Derive a unique QDP namespace::name from an impl_id."""
-    return f"tta_custom::host_kernel_{impl_id[:16]}"
+    return f"tta_custom::host_kernel_{impl_id[:8]}"
 
 
 # ---- Backend-object detection heuristics ----
@@ -250,6 +250,13 @@ def is_cutile_program(obj: Any) -> bool:
     """Heuristic: cuTILE programs are callables from cuda.tile.* modules."""
     modname = getattr(obj, "__module__", "")
     return callable(obj) and ("cuda.tile" in modname or "cutile" in modname)
+
+
+def is_cutedsl_compile_fn(obj: Any) -> bool:
+    """Heuristic: CuTe DSL compile entry-point."""
+    name = getattr(obj, "__name__", "")
+    modname = getattr(obj, "__module__", "")
+    return name == "compile" and ("cute" in modname or "cutlass" in modname)
 
 
 def is_cute_kernel(obj: Any) -> bool:
@@ -377,6 +384,19 @@ _MAX_DIM = 2**31 - 1
 _MIN_VALID_DIM = 1
 
 
+def dtype_token(td: Any) -> str:
+    """Return a short string token for a TensorDesc dtype."""
+    if td.dtype == trt.float16:
+        return "FP16"
+    if td.dtype == trt.bfloat16:
+        return "BF16"
+    if td.dtype == trt.float32:
+        return "FP32"
+    if td.dtype == trt.int32:
+        return "INT32"
+    return "OTHER"
+
+
 def format_token(tf: Any) -> str:
     """Return a short string token for a trt.TensorFormat."""
     if tf == trt.TensorFormat.LINEAR:
@@ -406,6 +426,41 @@ def format_token(tf: Any) -> str:
     if tf == trt.TensorFormat.DHWC:
         return "DHWC"
     return str(tf)
+
+
+# LIMITATION: Format enumeration is informational only.  collect_allowed_formats_for_io
+# gathers the union of formats from all kernel specs, but _build_autotune_fn always
+# passes "LINEAR" to the AutoTuneCombination string constructor regardless of what
+# this function returns.  Non-linear packed formats (HWC8, CHW4, etc.) are therefore
+# never actually advertised to TRT's autotuner and will never be selected as the
+# layout for a plugin I/O tensor.  A full implementation would need to enumerate all
+# format combinations and register a separate tactic per combination.
+def collect_allowed_formats_for_io(
+    specs: Sequence[Any],
+    io_idx: int,
+    num_inputs: int,
+) -> List[str]:
+    """Collect the union of allowed TensorFormats for a given I/O position.
+
+    Returns format tokens (e.g. "LINEAR", "HWC8") for the union of formats
+    advertised by all specs at the given I/O index.  Currently used for
+    informational purposes; _build_autotune_fn uses "LINEAR" directly in the
+    AutoTuneCombination string constructor.
+    """
+    allowed: set[str] = set()
+    for spec in specs:
+        if io_idx < num_inputs:
+            fmt_list = spec.input_formats
+        else:
+            fmt_list = spec.output_formats
+        if fmt_list is None:
+            allowed.add("LINEAR")
+        else:
+            for f in fmt_list:
+                allowed.add(format_token(f))
+    if not allowed:
+        allowed.add("LINEAR")
+    return sorted(allowed)
 
 
 # ---- Shape expression utilities ----
@@ -670,6 +725,17 @@ def make_meta_tensor_from_td_symbolic(td: Any) -> torch.Tensor:
     return torch.empty(shape, dtype=torch_dtype, device="meta")
 
 
+def make_td_from_meta(t: torch.Tensor) -> Any:
+    """Create a QDP TensorDesc from a meta tensor using t.shape and t.dtype."""
+    shape = tuple(int(d) for d in t.shape)
+    dtype = torch_dtype_to_trt(t.dtype)
+    if _TRT_AVAILABLE:
+        shape_expr = [trtp.SymInt32(d) for d in shape]
+    else:
+        shape_expr = list(shape)
+    return trtp.TensorDesc(dtype=dtype, shape_expr=shape_expr)
+
+
 def _output_shape_to_shape_expr(shape: Tuple[Any, ...], symbolic: bool = False) -> List[Any]:
     """Build a shape_expr list from a tensor shape tuple.
 
@@ -872,7 +938,6 @@ def _launch_params_from_trt(
     extra_args: Any,
     num_inputs: int = 1,
     num_outputs: int = 1,
-    param_binding_indices: Optional[List[int]] = None,
 ) -> types.SimpleNamespace:
     """Build a SimpleNamespace from a trtp.KernelLaunchParams and SymIntExprs.
 
@@ -904,15 +969,12 @@ def _launch_params_from_trt(
         getattr(launch, "block_y", 1),
         getattr(launch, "block_z", 1),
     )
-    if param_binding_indices is None:
-        param_binding_indices = list(range(num_inputs)) + list(
-            range(num_inputs, num_inputs + num_outputs)
-        )
     return types.SimpleNamespace(
         grid=grid,
         block=block,
         shared_mem=getattr(launch, "shared_mem", 0),
-        param_binding_indices=param_binding_indices,
+        param_binding_indices=list(range(num_inputs))
+        + list(range(num_inputs, num_inputs + num_outputs)),
         sym_int_exprs=extra_args,
     )
 
@@ -984,7 +1046,7 @@ def analyze_launch_args(
     scalar_symints: List[Any] = []
     seen_scalar = False
 
-    for k, a in enumerate(args):
+    for a in args:
         if isinstance(a, SymbolicTensor):
             if seen_scalar:
                 raise QDPRuntimeError(
@@ -992,10 +1054,9 @@ def analyze_launch_args(
                     stage="aot_impl",
                     backend=backend,
                     msg=(
-                        f"argument {k} (role=tensor, {a.role.name} index {a.index}) "
-                        f"follows a scalar argument — backend kernel arguments must be ordered as "
+                        "backend kernel arguments must be ordered as "
                         "[all tensor pointers..., then all scalars...]; "
-                        f"total args={len(args)}, num_inputs={num_inputs}, num_outputs={num_outputs}"
+                        "found a tensor argument after scalar arguments"
                     ),
                 )
             param_binding_indices.append(compute_binding_index(a))
@@ -1014,9 +1075,8 @@ def analyze_launch_args(
                 stage="aot_impl",
                 backend=backend,
                 msg=(
-                    f"argument {k} has unsupported type {type(a)!r}; "
-                    "only SymbolicTensor, SymInt32, and int scalars are allowed. "
-                    f"total args={len(args)}, num_inputs={num_inputs}, num_outputs={num_outputs}"
+                    f"unsupported launch argument type {type(a)!r}; "
+                    "only SymbolicTensor, SymInt32, and int scalars are allowed"
                 ),
             )
 

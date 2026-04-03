@@ -141,13 +141,7 @@ class _ShapeDim:
         return other // self._v
 
     def __int__(self) -> int:
-        try:
-            return int(self._v)
-        except Exception as e:
-            raise ValueError(
-                f"Cannot convert dynamic shape dimension to int: {self._v!r}. "
-                "This dimension depends on runtime input shape."
-            ) from e
+        return int(self._v)
 
     def __repr__(self) -> str:
         return f"_ShapeDim({self._v!r})"
@@ -172,21 +166,12 @@ def _strides_from_td(td: Any) -> Tuple[Any, ...]:
     replicates TRT's internal layout logic and is fragile.  Correct physical
     strides must come from TRT itself.
     """
-    try:
-        strides = getattr(td, "strides", None)
-    except AttributeError:
-        strides = None
+    strides = getattr(td, "strides", None)
     if strides is not None:
         return tuple(_to_sym_int(s) for s in strides)
 
     # Fallback: logical row-major strides from shape_expr.
-    try:
-        shape_expr = td.shape_expr
-    except AttributeError as e:
-        raise AttributeError(
-            f"_strides_from_td: tensor descriptor {td!r} has no 'strides' or 'shape_expr' attribute. "
-            "Ensure the tensor descriptor is a valid QDP TensorDesc."
-        ) from e
+    shape_expr = td.shape_expr
     prod = trtp.SymInt32(1) if _TRT_AVAILABLE else 1
     strides_list: list = []
     for i in range(len(shape_expr) - 1, -1, -1):
@@ -224,8 +209,8 @@ class SymbolicTensor:
         self._stride: Tuple[Any, ...] = _strides_from_td(self.td) if shape_expr is not None else ()
 
         # Pre-compute numel: Python int for fully-static shapes, SymInt32 for dynamic.
-        if shape_expr is None or len(shape_expr) == 0:
-            self._numel: Any = trtp.SymInt32(1) if _TRT_AVAILABLE else 1
+        if shape_expr is None:
+            self._numel: Any = 0
         else:
             concrete_dims = [_sym_to_int_if_const(d) for d in shape_expr]
             if all(isinstance(v, int) for v in concrete_dims):
@@ -255,19 +240,14 @@ class SymbolicTensor:
         return self.shape[dim]
 
     def shape_dim(self, dim: int) -> Any:
-        """Return the symbolic shape element for dimension *dim* (same as self._shape[dim])."""
-        return self._shape[dim]
+        """Return the raw SymInt32 for dimension *dim* from the underlying TensorDesc."""
+        return _to_sym_int(self.td.shape_expr[dim])
 
     def stride(self, dim: int | None = None):
         """PyTorch-style stride API: stride() or stride(dim)."""
         if dim is None:
             return self._stride
-        ndim = len(self._stride)
-        if dim < -ndim or dim >= ndim:
-            raise IndexError(
-                f"stride: dimension {dim} out of range for tensor with {ndim} dims"
-            )
-        return self._stride[dim % ndim]
+        return self._stride[dim]
 
     def numel(self) -> Any:
         """Total element count: Python int for static shapes, SymInt32 for dynamic."""
@@ -278,3 +258,9 @@ class SymbolicTensor:
         return True
 
 
+def cdiv(a: Any, b: int) -> Any:
+    """Ceiling division on a SymInt32 by a Python int divisor.
+
+    Only the pattern SymInt32 // int is required by the contract.
+    """
+    return (a + (b - 1)) // b

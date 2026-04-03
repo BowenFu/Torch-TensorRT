@@ -175,18 +175,7 @@ def _fix_triton_ptx_for_trt(
         if in_entry and ")" in line and ".param" not in line:
             in_entry = False
             if needs_reorder:
-                for _i in trt_order:
-                    if _i >= len(param_lines):
-                        raise TTAPluginError(
-                            op=kernel_name,
-                            stage="aot_impl",
-                            backend="triton",
-                            msg=(
-                                f"PTX reorder: index {_i} out of bounds for "
-                                f"{len(param_lines)} parameters in kernel '{kernel_name}'"
-                            ),
-                        )
-                reordered = [param_lines[i] for i in trt_order]
+                reordered = [param_lines[i] for i in trt_order if i < len(param_lines)]
             else:
                 reordered = param_lines[:num_used_params]
             for i, pline in enumerate(reordered):
@@ -226,7 +215,7 @@ def aot_impl_triton(
     inp_descs: List[Any],
     out_descs: List[Any],
     attrs: Optional[Dict[str, Any]] = None,
-) -> Tuple[str, bytes, Any, Any]:
+) -> Tuple[bytes, bytes, Any, Any]:
     """Triton AOT implementation: sandbox → record → compile → PTX.
 
     Steps:
@@ -346,17 +335,6 @@ def aot_impl_triton(
     for name in positional_names:
         if ptr_idx < len(param_binding_indices):
             b = param_binding_indices[ptr_idx]
-            if b < 0 or b >= len(all_descs):
-                raise TTAPluginError(
-                    op=qdp_symbol,
-                    stage="aot_impl",
-                    backend="triton",
-                    msg=(
-                        f"param_binding_indices[{ptr_idx}]={b} is out of range "
-                        f"(0..{len(all_descs)-1}) for {len(inp_descs)} inputs + "
-                        f"{len(out_descs)} outputs"
-                    ),
-                )
             dtype_str = _trt_dtype_to_triton_ptr(all_descs[b].dtype, qdp_symbol)
             signature[name] = f"*{dtype_str}"
             ptr_idx += 1
@@ -434,26 +412,9 @@ def aot_impl_triton(
     # the baked-in tile sizes).  Append a short config suffix so every tactic gets
     # a distinct name.
     if cfg:
-        parts = []
-        for k, v in sorted(cfg.items()):
-            if not isinstance(v, int):
-                raise TTAPluginError(
-                    op=qdp_symbol,
-                    stage="aot_impl",
-                    backend="triton",
-                    msg=(
-                        f"Triton config values must be integers for AOT compilation; "
-                        f"got {k}={v!r} ({type(v).__name__})"
-                    ),
-                )
-            parts.append(f"{k}{v}")
-        suffix = "_".join(parts)
+        suffix = "_".join(f"{k}{v}" for k, v in sorted(cfg.items()))
         unique_name = f"{kernel_name_str}_{suffix}"
-        ptx = re.sub(
-            r'(\.entry\s+)' + re.escape(kernel_name_str) + r'(\s*\()',
-            r'\g<1>' + unique_name + r'\g<2>',
-            ptx,
-        )
+        ptx = ptx.replace(kernel_name_str, unique_name)
         kernel_name_str = unique_name
 
     num_used = len(positional_names)
@@ -505,8 +466,5 @@ def compile_triton_kernel(spec: TritonSpec, config: Dict[str, Any]) -> AOTMetada
         inp_descs=inp_descs,
         out_descs=out_descs,
     )
-    launch_params = _launch_params_from_trt(
-        launch, extra_args, num_inputs=1, num_outputs=1,
-        param_binding_indices=None,  # compile_triton_kernel uses 1-in/1-out stubs; sequential is correct
-    )
+    launch_params = _launch_params_from_trt(launch, extra_args, num_inputs=1, num_outputs=1)
     return AOTMetadata(binary=ptx_bytes, kernel_name=kernel_name_str, launch_params=launch_params, backend="triton")
